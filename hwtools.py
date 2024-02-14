@@ -2,6 +2,8 @@ import os, sys
 import numpy as np
 from datetime import datetime as dt
 import xbout
+from boutdata.squashoutput import squashoutput
+import scipy as sp
 import xarray as xr
 
 class HWcase():
@@ -37,6 +39,21 @@ class HWcase():
         self.ds.metadata["Z"] = Z
         self.ds.metadata["lambda_n"] = lambda_n
         
+    def reconstruct_x(self):
+        
+        ds = self.ds
+        m = ds.metadata
+        ### Make X coordinate from dx (https://github.com/boutproject/xBOUT-examples/blob/master/hasegawa-wakatani/hasegawa-wakatani_example.ipynb)
+        dx = ds["dx"].isel(x=0).values
+
+        # Get rid of existing "x" coordinate, which is just the index values.
+        ds = ds.drop("x")
+
+        # Create a new coordinate, which is length in units of rho_s
+        ds = ds.assign_coords(x=np.arange(ds.sizes["x"])*dx[0])
+        
+        self.ds = ds
+        
         
     def unnormalise(self):
         
@@ -68,14 +85,7 @@ class HWcase():
         ds["phi"] *= T0   # Potential [V]
         ds["vort"] *= n0*qe   # Vorticity [???]
 
-        ### Make X coordinate from dx (https://github.com/boutproject/xBOUT-examples/blob/master/hasegawa-wakatani/hasegawa-wakatani_example.ipynb)
-        dx = ds["dx"].isel(x=0).values
-
-        # Get rid of existing "x" coordinate, which is just the index values.
-        ds = ds.drop("x")
-
-        # Create a new coordinate, which is length in units of rho_s
-        ds = ds.assign_coords(x=np.arange(ds.sizes["x"])*dx[0])
+       
 
         ### Unnormalise all spatial coordinates
         # Note Xarray won't let you do it inplace, hence this method
@@ -97,6 +107,7 @@ class HWcase():
         ds.metadata["B"] = B
         ds.metadata["Z"] = Z
         ds.metadata["rho_s0"] = rho_s0
+        ds.metadata["Omega_ci"] = omega_ci
         
         
         ### Alpha and kappa calcs
@@ -149,7 +160,7 @@ class HWcase():
         print(f"Z: {ds['z'].min().values*1e3:.1f} - {ds['z'].max().values*1e3:.1f} mm")
         print(f"\nTime simulated: {ds['t'].max().values:.1e} s")
         
-    def calculate_energy(self):
+    def calculate_energy_enstrophy(self):
         """
         Get integral of KE and PE in the domain as per Korsholm 1999 but in SI units
         """
@@ -170,6 +181,7 @@ class HWcase():
         dz = ds["dz"].values.flatten()[0]
         dv = dx * dy * dz
 
+        ### Energy
         gradPhi_all = np.gradient(phi, dx, dy, dz, axis = (1,2,3))   # List of gradients along x,y,z
         gradPhi = np.sum(gradPhi_all, axis = 0)   # Sum of gradients 
         gradPhiPar = gradPhi[1]
@@ -185,13 +197,49 @@ class HWcase():
 
 
         # Potential energy is the absolute of the density deviation times background temp and integrated over volume
-        PE = n_fl**2 / m["n0"] * m["T0"] * constants("qe")    # [J/m3]
+        # It's like the internal energy associated with the density fluctuations
+        PE = 3/2 * n_fl**2 / m["n0"] * m["T0"] * constants("qe")    # [J/m3]
         PE = np.sum(PE,axis=(1,2,3)) * dv
         
         ds["PE"] = xr.DataArray(PE, dims = ["t"])
         ds["KE"] = xr.DataArray(KE, dims = ["t"])
         
+        ### Enstrophy
+        ## n [m^-3] * e [C] = charge density [C m^-3]
+        ## vort is also in [C m^-3]
+        ## W units are therefore C^2 m^-3?
+        ds["W"] = (0.5 * (n_fl * constants("qe") - vort)**2 * dv).sum(axis = (1,2,3))
+        
         self.ds = ds
+        
+    def calculate_spectrum(self, variable, sample_rate = 1e6):
+        """
+        Calculate spectrum from provided variable name and sample rate (1e6 = sampling every 1us)
+        Returns wavenumber f and spectrum avg
+        """
+        
+
+        
+        ds = self.ds
+        data = ds[variable].values
+        t = ds["t"].values * sample_rate
+        dt = t[1] - t[0]
+        
+        # power_spectra = np.zeros_like(data[:, 0, 0, 0])
+        power_spectra = []
+
+        for i in range(data.shape[1]):
+            for j in range(data.shape[2]):
+                for k in range(data.shape[3]):
+                    signal = data[:,i,j,k]
+                    f, psd = sp.signal.welch(signal, fs=1./dt, nperseg = 101, scaling = 'spectrum')
+                    power_spectra.append(psd)
+                    
+        spectra_avg = np.sum(power_spectra, axis = 0)
+        spectra_avg /= (data.shape[1] * data.shape[2] * data.shape[3])
+        spectra_avg = np.sqrt(spectra_avg)/ds.metadata["n0"]
+        
+        return f, spectra_avg
         
         
         
