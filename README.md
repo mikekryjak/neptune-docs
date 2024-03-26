@@ -1,0 +1,3 @@
+- Notebooks (*.ipynb) contain figures and code to make report plots
+- hwtools.py contains functions for unnormalisation and plot generation
+- GIF animations provided for key report results
